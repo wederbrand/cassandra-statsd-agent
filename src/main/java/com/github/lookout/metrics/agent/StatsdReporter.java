@@ -19,45 +19,50 @@
 
 package com.github.lookout.metrics.agent;
 
+import com.codahale.metrics.*;
+import com.codahale.metrics.Timer;
+import com.codahale.metrics.jvm.GarbageCollectorMetricSet;
+import com.codahale.metrics.jvm.MemoryUsageGaugeSet;
 import com.github.lookout.metrics.agent.generators.CassandraJMXGenerator;
-import com.github.lookout.metrics.agent.generators.JavaVMGenerator;
 import com.github.lookout.metrics.agent.generators.MetricGenerator;
-import com.github.lookout.metrics.agent.generators.YammerMetricsGenerator;
 import com.timgroup.statsd.StatsDClient;
-import com.yammer.metrics.Metrics;
-import com.yammer.metrics.core.*;
-import com.yammer.metrics.reporting.AbstractPollingReporter;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.*;
 import java.util.concurrent.TimeUnit;
 
-public class StatsdReporter extends AbstractPollingReporter {
+public class StatsdReporter extends ScheduledReporter {
 
     private static final Logger LOG = LoggerFactory.getLogger(StatsdReporter.class);
 
-
     private final StatsDClient statsd;
+    private final MetricRegistry metricRegistry;
 
     private boolean reportedStartup = false;
     private final HostPortInterval hostPortInterval;
 
     private final Set<MetricGenerator> generators = new HashSet<>();
 
-    public StatsdReporter(final HostPortInterval hostPortInterval, final StatsDClient statsd) {
-        super(Metrics.defaultRegistry(), "statsd");
+    public StatsdReporter(MetricRegistry metricRegistry, final HostPortInterval hostPortInterval, final StatsDClient statsd) {
+        super(metricRegistry, "statsd", MetricFilter.ALL, TimeUnit.SECONDS, TimeUnit.MILLISECONDS);
+        this.metricRegistry = metricRegistry;
         this.hostPortInterval = hostPortInterval;
         this.statsd = statsd;
 
+        // All are gauges so no handling for timers and stuff
+        // all of these are Longs
+        this.metricRegistry.registerAll(new GarbageCollectorMetricSet());
+        // all of these are Longs, unless they are RatioGauges, then they are doubles
+        this.metricRegistry.registerAll(new MemoryUsageGaugeSet());
+
         // This really should be done with an injection framework, but that's too heavy for this
         generators.add(new CassandraJMXGenerator());
-        generators.add(new JavaVMGenerator());
-        generators.add(new YammerMetricsGenerator());
+        generators.add(new CassandraExposedJMX());
     }
 
     @Override
-    public void run() {
+    public void report(SortedMap<String, Gauge> gauges, SortedMap<String, Counter> counters, SortedMap<String, Histogram> histograms, SortedMap<String, Meter> meters, SortedMap<String, Timer> timers) {
         if (!reportedStartup || LOG.isDebugEnabled()) {
             LOG.info("Statsd reporting to {}", hostPortInterval);
             reportedStartup = true;
@@ -71,6 +76,17 @@ public class StatsdReporter extends AbstractPollingReporter {
                 } else {
                     LOG.warn("Error writing to statsd: {}", e.getMessage());
                 }
+            }
+        }
+
+        // send all metrics to statsd
+        for (Map.Entry<String, Gauge> entry : gauges.entrySet()) {
+            Gauge value = entry.getValue();
+            if (value instanceof RatioGauge) {
+                statsd.gauge(entry.getKey(), (Double) value.getValue());
+            }
+            else {
+                statsd.gauge(entry.getKey(), (Long) value.getValue());
             }
         }
     }
